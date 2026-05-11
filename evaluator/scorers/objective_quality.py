@@ -1,12 +1,10 @@
 import json
 import os
 import re
-from collections import defaultdict
-from typing import Dict, List, Union, Any, Optional
+from typing import Dict, List, Any, Optional
 
 from dotenv import load_dotenv
 from litellm import completion
-from openai import OpenAI
 from pydantic import BaseModel
 
 from evaluator.scorers.base import LLMScorer, ScorerResult

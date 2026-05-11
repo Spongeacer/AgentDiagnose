@@ -3,9 +3,7 @@ import os
 import re
 import urllib.parse
 from collections import defaultdict
-from typing import Dict, List, Any, Union, Tuple
-
-from litellm import completion
+from typing import Dict, List, Any, Tuple
 
 from evaluator.scorers.base import BaseScorer, ScorerResult
 from evaluator.trajectory import Trajectory, Action

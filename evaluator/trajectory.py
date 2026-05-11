@@ -71,11 +71,12 @@ class Action:
 
 
 class Trajectory:
-    def __init__(self, objective: str, actions: List[Action], task_website: str, reward: int = -1):
+    def __init__(self, objective: str, actions: List[Action], task_website: str, reward: int = -1, id: str = ""):
         self.objective = objective
         self.actions = actions
         self.task_website = task_website
         self.reward = reward
+        self.id = id
     
     @classmethod
     def from_browsergym_pickle(cls, exp_dir):
@@ -203,6 +204,94 @@ class Trajectory:
             actions=actions,
             task_website=json_data.get("task_website", ""),
             reward=json_data.get("reward", -1)
+        )
+
+    @classmethod
+    def from_ducc_record(cls, record: dict) -> 'Trajectory':
+        """Parse a single JSONL record from ducc trajectory log."""
+        prompt_turns = json.loads(record.get("prompt", "[]"))
+        data_id = record.get("data_id", "")
+
+        # objective: first user turn's text content
+        objective = ""
+        for turn in prompt_turns:
+            if turn.get("role") == "user":
+                content = turn.get("content", [])
+                if isinstance(content, list):
+                    texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                    objective = " ".join(t for t in texts if t).strip()
+                elif isinstance(content, str):
+                    objective = content.strip()
+                if objective:
+                    break
+
+        # build tool_result lookup: tool_use_id -> content
+        tool_results: dict = {}
+        for turn in prompt_turns:
+            if turn.get("role") == "user":
+                content = turn.get("content", [])
+                if isinstance(content, list):
+                    for c in content:
+                        if c.get("type") == "tool_result":
+                            result_content = c.get("content", "")
+                            if isinstance(result_content, list):
+                                result_content = " ".join(
+                                    item.get("text", "") for item in result_content
+                                    if isinstance(item, dict) and item.get("type") == "text"
+                                )
+                            tool_results[c.get("tool_use_id", "")] = str(result_content)
+
+        # build actions from assistant turns that contain tool_use
+        actions = []
+        step = 0
+        for turn in prompt_turns:
+            if turn.get("role") != "assistant":
+                continue
+            content = turn.get("content", [])
+            if not isinstance(content, list):
+                continue
+
+            # collect reasoning (text content in this turn)
+            reasoning_parts = []
+            for c in content:
+                if c.get("type") == "text" and c.get("text", "").strip():
+                    reasoning_parts.append(c["text"].strip())
+
+            # one Action per tool_use in this turn
+            for c in content:
+                if c.get("type") != "tool_use":
+                    continue
+                step += 1
+                tool_name = c.get("name", "")
+                tool_input = c.get("input", {})
+                tool_use_id = c.get("id", "")
+
+                try:
+                    action_str = f"{tool_name}({json.dumps(tool_input, ensure_ascii=False)})"
+                except Exception:
+                    action_str = f"{tool_name}({str(tool_input)})"
+
+                observation = tool_results.get(tool_use_id, "")
+
+                action = Action(
+                    action=action_str,
+                    reasoning="\n".join(reasoning_parts),
+                    action_type=tool_name,
+                    observation=observation,
+                    url="",
+                    nth_step=step,
+                    output=f"{chr(10).join(reasoning_parts)}\n\nAction: {action_str}".strip(),
+                )
+                actions.append(action)
+                # reasoning only attached to first tool_use in turn
+                reasoning_parts = []
+
+        return cls(
+            objective=objective,
+            actions=actions,
+            task_website="",
+            reward=-1,
+            id=data_id,
         )
 
     @classmethod
@@ -639,13 +728,38 @@ class Trajectory:
     def label_verb_noun_pairs(self, print_stats=False):
         data = [[action] for action in self.actions]
         labeled_data = label_verb_noun(data, print_stats=print_stats)
-        
+
         for i, action_list in enumerate(labeled_data):
             if i < len(self.actions):
                 self.actions[i].output_root_verb = action_list[0].output_root_verb
                 self.actions[i].output_root_noun = action_list[0].output_root_noun
                 self.actions[i].output_verb_noun_pairs = action_list[0].output_verb_noun_pairs
-        
+
+        return self
+
+    def label_verb_noun_from_tool_calls(self) -> "Trajectory":
+        """Extract verb-noun pairs from structured tool calls (for coding agents).
+
+        Works on any Trajectory format where Action.action_type is a tool name
+        (Bash, Edit, Read, Grep, Glob, ...). No NLP model required.
+        Fills the same output_root_verb / output_root_noun / output_verb_noun_pairs
+        fields as label_verb_noun_pairs(), so downstream embedding and tag-cloud
+        pipelines work unchanged.
+        """
+        from evaluator.tool_verb_noun_extractor import extract_verb_noun_from_action
+
+        for action in self.actions:
+            try:
+                verb, noun, pairs = extract_verb_noun_from_action(
+                    action.action_type, action.action or ""
+                )
+            except Exception:
+                verb, noun, pairs = "", "", []
+
+            action.output_root_verb = verb
+            action.output_root_noun = noun
+            action.output_verb_noun_pairs = pairs
+
         return self
 
 
